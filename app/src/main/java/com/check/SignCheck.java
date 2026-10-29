@@ -10,20 +10,16 @@ import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.system.Os;
-import android.system.StructStat;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
-import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.regex.Matcher;
@@ -33,36 +29,76 @@ import java.util.regex.Pattern;
 import libcore.io.Libcore;
 import libcore.io.Memory;
 import sun.misc.Unsafe;
-import sun.security.pkcs.PKCS7;
-import sun.security.pkcs.SignerInfo;
 
 public class SignCheck {
     // 注入工具会自动替换这里的哈希
     private static final int EXPECTED_HASH = 0x2b3920e6;
 
-    public static void init(Application app) {
+    // ==========================================
+    // === 入口 1：基础保护（极速、零误报） ===
+    // ==========================================
+    public static void initBasic(Application app) {
         try {
-            // 基础校验
+            checkSignAPI(app);
+            checkDebug(app);
+            checkPath(app);
+        } catch (Throwable t) {
+            killProcess();
+        }
+    }
+
+    // ==========================================
+    // === 入口 2：均衡保护（防常规MT去签） ===
+    // ==========================================
+    public static void initStandard(Application app) {
+        try {
             checkSignAPI(app);
             checkDebug(app);
             checkPath(app);
             
-            // 进阶校验
-            checkSignBinder(app);
             checkSignV1(app);
             checkInode(app);
-            
-            // 硬核环境校验
             checkProcessStatus();
             checkOpenFD();
-            checkApkMemoryPermission(app);
-            checkHiddenApiExemptions();
-            
         } catch (Throwable t) {
-            // 只要有任何一个异常，直接杀进程
             killProcess();
         }
     }
+
+    // ==========================================
+    // === 入口 3：实验保护（防内存挂、底层调试） ===
+    // ==========================================
+    public static void initExperimental(Application app) {
+        try {
+            checkSignAPI(app);
+            checkDebug(app);
+            checkPath(app);
+            
+            checkSignV1(app);
+            checkInode(app);
+            checkProcessStatus();
+            checkOpenFD();
+            
+            checkSignBinder(app);
+            checkApkMemoryPermission(app);
+            checkHiddenApiExemptions();
+        } catch (Throwable t) {
+            killProcess();
+        }
+    }
+
+    // ==========================================
+    // === 默认入口（兼容之前的调用） ===
+    // ==========================================
+    public static void init(Application app) {
+        // 默认使用最严格的实验级
+        initExperimental(app);
+    }
+
+
+    // ==========================================
+    // === 以下为底层校验逻辑实现 ===
+    // ==========================================
 
     private static void checkSignAPI(Application app) throws Exception {
         PackageManager pm = app.getPackageManager();
@@ -102,7 +138,6 @@ public class SignCheck {
         if (pi == null || pi.signatures[0].hashCode() != EXPECTED_HASH) fail("Binder Sign mismatch");
     }
 
-    // V1 签名和 ZIP 完整性校验（防二次打包）
     private static void checkSignV1(Application app) throws Exception {
         JarFile apk = new JarFile(app.getPackageCodePath());
         JarEntry rsa = null;
@@ -141,7 +176,6 @@ public class SignCheck {
         }
     }
 
-    // 检查进程状态（防 ptrace 调试）
     private static void checkProcessStatus() throws Exception {
         FileInputStream fis = new FileInputStream("/proc/self/status");
         byte[] buf = new byte[10240];
@@ -155,7 +189,6 @@ public class SignCheck {
         }
     }
 
-    // 检查文件描述符（防 memfd 内存加载）
     private static void checkOpenFD() throws Exception {
         File fdDir = new File("/proc/self/fd");
         File[] files = fdDir.listFiles();
@@ -169,7 +202,6 @@ public class SignCheck {
         }
     }
 
-    // 检查 APK 内存映射段的权限和 ELF 头（防藏 SO）
     private static void checkApkMemoryPermission(Application app) throws Exception {
         String apkPath = app.getPackageCodePath();
         FileInputStream fis = new FileInputStream("/proc/self/maps");
@@ -183,7 +215,6 @@ public class SignCheck {
             String perm = parts[1];
             if (perm.contains("x") || perm.contains("w")) fail("APK memory permission abnormal");
             
-            // 检查 ELF 头
             long start = Long.parseLong(parts[0].split("-")[0], 16);
             byte[] head = new byte[4];
             Memory.peekByteArray(start, head, 0, 4);
@@ -193,31 +224,25 @@ public class SignCheck {
         }
     }
 
-    // 检测 Hidden API 豁免（利用 Unsafe 读取 Class 内部结构）
     private static void checkHiddenApiExemptions() throws Exception {
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.O) return; // 安卓8以下跳过
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.O) return; 
         
-        // 反射获取 Unsafe 实例
         Field f = Unsafe.class.getDeclaredField("theUnsafe");
         f.setAccessible(true);
         Unsafe unsafe = (Unsafe) f.get(null);
         
         Class<?> clazz = Class.forName("dalvik.system.VMRuntime");
-        // 尝试寻找 iFields 偏移，这里是个简化版探针，真实偏移需动态计算
-        // 为了演示完整性，这里只做一个简单的检测机制
         try {
             Method getRuntime = clazz.getDeclaredMethod("getRuntime");
             getRuntime.setAccessible(true);
             Object vmRuntime = getRuntime.invoke(null);
             
-            // 如果这些底层方法能轻易反射出来，说明黑名单可能被完全豁免了
             Method setHiddenApiExemptions = clazz.getDeclaredMethod("setHiddenApiExemptions", String[].class);
             setHiddenApiExemptions.setAccessible(true);
-            // 如果没抛异常说明可以随便调用，如果是破解器通常会开这个
         } catch (NoSuchMethodException e) {
-            // 正常的 Android 行为，找不到或不让访问是好事
+            // 正常
         } catch (Exception e) {
-             // 如果抛了 SecurityException 说明被拦截了，这是正常的
+             // 正常
         }
     }
 
