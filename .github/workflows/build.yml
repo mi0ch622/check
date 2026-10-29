@@ -18,34 +18,38 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK (for d8 tool)
+      - name: Setup Android SDK (仅用于获取 d8 和官方基础 lib)
         uses: android-actions/setup-android@v4
 
-      - name: Compile Java to DEX using Original Android.jar
+      - name: Compile Java to DEX
         run: |
           mkdir -p build_out
           
-          # 找到官方 SDK 目录（我们只用里面的 d8 和基础 lib，不用它的 android.jar 编译）
+          # 获取官方 SDK 的基础库用于 d8 转换
           ANDROID_LIB=$(find $ANDROID_HOME/platforms -name "android.jar" | sort -V | tail -n 1)
           D8_PATH=$(find $ANDROID_HOME/build-tools -name "d8" | sort -V | tail -n 1)
           
-          echo "开始使用原作者的 android.jar 编译..."
+          echo "使用本地的 original-android.jar 编译..."
           
-          # 1. 核心：直接使用你推上去的原版 jar 编译
+          # 1. javac 编译：完全依赖你的本地 jar，杜绝网络问题
           javac -source 1.8 -target 1.8 \
             -classpath "libs/original-android.jar" \
             -d build_out \
             app/src/main/java/com/check/*.java
             
-          echo "编译完成，准备转换 DEX..."
+          echo "编译完成，正在转换为 DEX..."
           
-          # 2. 转换 DEX 时，传入官方 SDK 的 android.jar 作为辅助 lib
+          # 2. d8 转换：将 class 打包为 dex
           "$D8_PATH" --min-api 19 --lib "$ANDROID_LIB" --output build_out build_out/com/check/*.class
 
       - name: Baksmali to Smali
         run: |
-          curl -sSL -o baksmali.jar https://github.com/baksmali/smali/releases/download/v3.0.5/baksmali-3.0.5-fat.jar
-          java -jar baksmali.jar d build_out/classes.dex -o smali_out
+          echo "开始使用本地的 baksmali.jar 反编译..."
+          
+          # 直接使用你刚放进 libs 里的 baksmali，绝对不打脸
+          java -jar libs/baksmali.jar d build_out/classes.dex -o smali_out
+          
+          # 打包成 zip 供下载
           cd smali_out && zip -r ../SignCheck_Full_Smali.zip com/
 
       - name: Upload Smali Artifact
