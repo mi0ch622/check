@@ -18,39 +18,51 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      # 使用最新的 v4 版本，彻底解决 sdkmanager 找不到 tools 的报错
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
-      - name: Download Hidden API jar
+      - name: Download Dependencies
         run: |
           mkdir -p libs
-          # 从 Maven 中央仓库拉取包含隐藏 API 的 android.jar
-          curl -L -o libs/android-hidden-api.jar https://repo1.maven.org/maven2/com/anggrayudi/android-hidden-api/30.0/android-hidden-api-30.0.jar
+          echo "Downloading android-hidden-api..."
+          # 使用最稳定的 API 30 版本，包含所有需要的隐藏类
+          curl -sSL -o libs/android-hidden-api.jar https://repo1.maven.org/maven2/com/anggrayudi/android-hidden-api/30.0/android-hidden-api-30.0.jar
+          
+          echo "Downloading baksmali..."
+          curl -sSL -o baksmali.jar https://github.com/baksmali/smali/releases/download/v3.0.5/baksmali-3.0.5-fat.jar
 
       - name: Compile Java to DEX
         run: |
           mkdir -p build_out
-          ANDROID_JAR=$(find $ANDROID_HOME/platforms -name "android.jar" | head -n 1)
           
-          # 编译时同时包含官方 android.jar 和隐藏 api jar
-          # 增加 --add-exports 允许访问 sun.misc 等内部包
+          # 智能寻找最新的 android.jar
+          ANDROID_JAR=$(find $ANDROID_HOME/platforms -name "android.jar" | sort -V | tail -n 1)
+          echo "Found android.jar at: $ANDROID_JAR"
+          
+          # 编译 Java（同时引入官方 SDK 和我们下载的隐藏 API 库）
+          echo "Compiling Java..."
           javac -source 1.8 -target 1.8 \
             -classpath "$ANDROID_JAR:libs/android-hidden-api.jar" \
             -d build_out \
             app/src/main/java/com/check/*.java
-          
+            
           D8_PATH=$(find $ANDROID_HOME/build-tools -name "d8" | sort -V | tail -n 1)
+          echo "Found d8 at: $D8_PATH"
           
-          # 打包 dex（注意：只打包我们的校验类，不打包隐藏 api jar 里的类）
-          "$D8_PATH" --min-api 19 --output build_out build_out/com/check/*.class
+          # 转换为 DEX（关键：加入 --lib 参数，防止 d8 找不到 Android 基础类）
+          echo "Converting to DEX..."
+          "$D8_PATH" --min-api 19 --lib "$ANDROID_JAR" --output build_out build_out/com/check/*.class
 
       - name: Baksmali to Smali
         run: |
-          curl -L -o baksmali.jar https://github.com/baksmali/smali/releases/download/v3.0.5/baksmali-3.0.5-fat.jar
+          echo "Disassembling to Smali..."
           java -jar baksmali.jar d build_out/classes.dex -o smali_out
+          
+          # 只打包我们需要的 smali 目录
           cd smali_out && zip -r ../SignCheck_Full_Smali.zip com/
 
-      - name: Upload Full Smali Artifact
+      - name: Upload Smali Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SignCheck-Full-Smali
